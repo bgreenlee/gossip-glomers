@@ -16,7 +16,7 @@ func main() {
 	messages := set.NewSet[int]() // messages we've received
 	var neighbors []string        // our neighbor nodes from the topology message
 
-	awaitingAcks := map[int]string{} // map of message id -> node we're awaiting an ack from
+	awaitingAcks := map[int][]string{} // map of message id -> nodes we're awaiting an ack from
 	var awaitingAcksMutex sync.RWMutex
 
 	n.Handle("broadcast", func(msg maelstrom.Message) error {
@@ -29,14 +29,13 @@ func main() {
 			return err
 		}
 
-		message := broadcastMessage.Message
-		messageId := broadcastMessage.MsgId
-
 		// ack immediately
 		n.Reply(msg, map[string]any{
-			"type":        "broadcast_ok",
-			"in_reply_to": messageId,
+			"type": "broadcast_ok",
 		})
+
+		message := broadcastMessage.Message
+		messageId := broadcastMessage.MsgId
 
 		// store and forward new messages
 		if !messages.Contains(message) {
@@ -46,22 +45,20 @@ func main() {
 			for _, node := range neighbors {
 				if node != msg.Src { // don't send it to our source
 					awaitingAcksMutex.Lock()
-					awaitingAcks[messageId] = node
+					awaitingAcks[messageId] = append(awaitingAcks[messageId], node)
 					awaitingAcksMutex.Unlock()
 				}
 			}
 
 			// send anything in awaitingAcks, and keep retrying until everything has acked
-			go func() {
-				for len(awaitingAcks) > 0 {
-					awaitingAcksMutex.RLock()
-					for _, node := range awaitingAcks {
-						n.Send(node, msg.Body)
-					}
-					awaitingAcksMutex.RUnlock()
-					time.Sleep(1000 * time.Millisecond)
+			for len(awaitingAcks[messageId]) > 0 {
+				awaitingAcksMutex.RLock()
+				for _, node := range awaitingAcks[messageId] {
+					n.Send(node, msg.Body)
 				}
-			}()
+				awaitingAcksMutex.RUnlock()
+				time.Sleep(1000 * time.Millisecond)
+			}
 		}
 
 		return nil
@@ -79,7 +76,18 @@ func main() {
 		// remove from awaitingAcks
 		awaitingAcksMutex.Lock()
 		defer awaitingAcksMutex.Unlock()
-		delete(awaitingAcks, broadcastOkMessage.InReplyTo)
+		nodes := awaitingAcks[broadcastOkMessage.InReplyTo]
+		if len(nodes) <= 1 {
+			awaitingAcks[broadcastOkMessage.InReplyTo] = []string{}
+		} else {
+			// find our node
+			var i int
+			for i = 0; i < len(nodes) && nodes[i] != msg.Src; i++ {
+			}
+			// delete by replacing our node with the last one, and then truncating the slice by one
+			nodes[i] = nodes[len(nodes)-1]
+			awaitingAcks[broadcastOkMessage.InReplyTo] = nodes[:len(nodes)-1]
+		}
 		return nil
 	})
 
