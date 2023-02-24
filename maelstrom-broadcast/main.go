@@ -12,6 +12,7 @@ import (
 func main() {
 	n := maelstrom.NewNode()
 
+	// sets are thread-safe
 	messages := set.NewSet[int]() // messages we've received
 	var neighbors []string        // our neighbor nodes from the topology message
 
@@ -47,19 +48,17 @@ func main() {
 			// send anything in awaitingAcks, and keep retrying until everything has acked
 			for awaitingAcks.Cardinality() > 0 {
 				for node := range awaitingAcks.Iter() {
-					go n.RPC(node, msg.Body, func(msg maelstrom.Message) error {
-						var broadcastOkMessage struct {
-							Type      string
-							InReplyTo int
+					// send the message and wait for the reply
+					n.RPC(node, msg.Body, func(msg maelstrom.Message) error {
+						if msg.Type() == "broadcast_ok" {
+							awaitingAcks.Remove(node)
+							return nil
 						}
-						if err := json.Unmarshal(msg.Body, &broadcastOkMessage); err != nil {
-							return err
-						}
-						awaitingAcks.Remove(node)
-						return nil
+						// unexpected; assume it is an error
+						return msg.RPCError()
 					})
 				}
-				time.Sleep(1000 * time.Millisecond)
+				time.Sleep(500 * time.Millisecond)
 			}
 		}
 
